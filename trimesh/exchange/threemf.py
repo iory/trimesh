@@ -4,6 +4,7 @@ import uuid
 import zipfile
 
 import numpy as np
+from scipy.spatial import distance
 
 from .. import graph, util
 from ..constants import log
@@ -259,6 +260,12 @@ def export_3MF(mesh, batch_size=4096, compression=zipfile.ZIP_DEFLATED, compress
             models.append(x)
         return str(models.index(x) + 1)
 
+    def generate_unique_name(existing_names):
+        unique_name = str(uuid.uuid4())
+        while unique_name in existing_names:
+            unique_name = str(uuid.uuid4())
+        return unique_name
+
     # 3mf archive dict {path: BytesIO}
     file_obj = io.BytesIO()
 
@@ -266,6 +273,9 @@ def export_3MF(mesh, batch_size=4096, compression=zipfile.ZIP_DEFLATED, compress
     zip_kwargs = {"compression": compression}
     # compresslevel was added in Python 3.7
     zip_kwargs["compresslevel"] = compresslevel
+
+    model_to_material_id = {}
+    model_to_unique_colors = {}
 
     with zipfile.ZipFile(file_obj, mode="w", **zip_kwargs) as z:
         # 3dmodel.model
@@ -279,6 +289,25 @@ def export_3MF(mesh, batch_size=4096, compression=zipfile.ZIP_DEFLATED, compress
                 # objects with mesh data and/or references to other objects
                 with xf.element("resources"):
                     # stream objects with actual mesh data
+
+                    # assign model id
+                    for name in geometry.keys():
+                        model_id(name)
+
+                    for i, (name, m) in enumerate(geometry.items()):
+                        material_name = generate_unique_name(models)
+                        material_id = model_id(material_name)
+                        model_to_material_id[model_id(name)] = material_id
+                        face_colors = m.visual.face_colors
+                        unique_colors = np.unique(face_colors, axis=0)
+                        model_to_unique_colors[model_id(name)] = unique_colors
+                        with xf.element("basematerials", id=material_id):
+                            for color_i, rgb in enumerate(unique_colors):
+                                xf.write(etree.Element(
+                                    "base", name=material_name + '_{}'.format(color_i),
+                                    displaycolor="#{:02X}{:02X}{:02X}".format(
+                                        rgb[0], rgb[1], rgb[2])))
+
                     for i, (name, m) in enumerate(geometry.items()):
                         # attributes for object
                         attribs = {
@@ -307,8 +336,15 @@ def export_3MF(mesh, batch_size=4096, compression=zipfile.ZIP_DEFLATED, compress
                                     xf.flush()
                                     for i in range(0, len(m.faces), batch_size):
                                         batch = m.faces[i : i + batch_size]
+                                        distances = distance.cdist(m.visual.face_colors, model_to_unique_colors[model_id(name)])
+                                        color_indices = np.argmin(distances, axis=1)
+                                        batch = np.concatenate([
+                                            batch,
+                                            int(model_to_material_id[model_id(name)]) * np.ones((len(batch), 1), dtype=np.int32),
+                                            color_indices.reshape(-1, 1)],
+                                                               axis=1)
                                         fragment = (
-                                            '<triangle v1="{}" v2="{}" v3="{}" />'
+                                            '<triangle v1="{}" v2="{}" v3="{}" pid="{}" p1="{}" />'
                                             * len(batch)
                                         )
                                         f.write(
